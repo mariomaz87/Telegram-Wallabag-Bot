@@ -1,0 +1,12 @@
+version: '3'
+services:
+  wallabag-bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - WALLABAG_CLIENT_ID=${WALLABAG_CLIENT_ID}
+      - WALLABAG_CLIENT_SECRET=${WALLABAG_CLIENT_SECRET}
+      - WALLABAG_USERNAME=${WALLABAG_USERNAME}
+      - WALLABAG_PASSWORD=${WALLABAG_PASSWORD}
+      - MY_CHAT_ID=${MY_CHAT_ID}
