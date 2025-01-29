@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import requests
+import re
 import asyncio
 from dotenv import load_dotenv
 from telegram import Update
@@ -67,6 +68,24 @@ def get_wallabag_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
+def is_valid_url(url: str) -> bool:
+    """Validate the provided URL"""
+    url_regex = re.compile(
+        r'^(?:http|ftp)s?://' # http:// or https://
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|' # domain...
+        r'localhost|' # localhost...
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|' # ...or ipv4
+        r'\[?[A-F0-9]*:[A-F0-9:]+\]?)' # ...or ipv6
+        r'(?::\d+)?' # optional port
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+    return re.match(url_regex, url) is not None
+
+def is_valid_tag(tag: str) -> bool:
+    """Validate the provided tag"""
+    # Assuming tags should not contain spaces and special characters
+    tag_regex = re.compile(r'^[a-zA-Z0-9_-]+$')
+    return re.match(tag_regex, tag) is not None
+
 @chat_id_restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued"""
@@ -111,26 +130,36 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle the initial URL message"""
     # Clear any previous state
     context.user_data.clear()
-    
+
     message_text = update.message.text.strip()
-    
+
     # Split message into lines
     lines = message_text.split('\n')
     first_line_parts = lines[0].split()
     url = first_line_parts[0].strip()
+
+    if not is_valid_url(url):
+        await update.message.reply_text("The provided URL is invalid. Please provide a valid URL.")
+        return ConversationHandler.END
     
     # Store URL in context
     context.user_data['current_url'] = url
-    
+
     # Check for tags in the same line after the URL
     if len(first_line_parts) > 1:
         tags = " ".join(first_line_parts[1:]).strip()
+        if not is_valid_tag(tags):
+            await update.message.reply_text("One or more provided tags are invalid. Please provide valid tags.")
+            return ConversationHandler.END
         await process_url_and_tags(update, url, tags)
         context.user_data.clear()  # Clear state after processing
         return ConversationHandler.END
     # Check for tags in next line
     elif len(lines) > 1:
         tags = lines[1].strip()
+        if not is_valid_tag(tags):
+            await update.message.reply_text("One or more provided tags are invalid. Please provide valid tags.")
+            return ConversationHandler.END
         await process_url_and_tags(update, url, tags)
         context.user_data.clear()  # Clear state after processing
         return ConversationHandler.END
