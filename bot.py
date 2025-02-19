@@ -55,7 +55,6 @@ def chat_id_restricted(func):
     return wrapped
 
 def get_wallabag_token():
-    """Get Wallabag access token"""
     token_url = f"{WALLABAG_URL}/oauth/v2/token"
     data = {
         "grant_type": "password",
@@ -64,9 +63,19 @@ def get_wallabag_token():
         "username": WALLABAG_USERNAME,
         "password": WALLABAG_PASSWORD
     }
-    response = requests.post(token_url, data=data)
-    response.raise_for_status()
-    return response.json()["access_token"]
+    try:
+        logger.info(f"Requesting token from {token_url} with data: {data}")
+        response = requests.post(token_url, data=data)
+        response.raise_for_status()
+        token = response.json()["access_token"]
+        logger.info(f"Token request successful. Token: {token}")
+        return token
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"HTTP error occurred: {http_err.response.text}")
+        raise
+    except Exception as err:
+        logger.error(f"Other error occurred: {err}")
+        raise
 
 def is_valid_url(url: str) -> bool:
     """Validate the provided URL"""
@@ -91,7 +100,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued"""
     await update.message.reply_text("Send me a URL to save it to Wallabag. "
                                   "You can add tags in the same message after the URL (in a new line) "
-                                  "or in a follow-up message within 5 seconds.")
+                                  "or in a follow-up message within 10 seconds.")
     return ConversationHandler.END
 
 async def process_url_and_tags(update: Update, url: str, tags: str) -> None:
@@ -165,10 +174,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     else:
         # Wait for potential tags
-        await update.message.reply_text("Waiting 5 seconds for tags...")
+        await update.message.reply_text("Waiting 10 seconds for tags...")
         context.job_queue.run_once(
             callback=timeout_callback, 
-            when=5, 
+            when=10, 
             data={'update': update, 'url': url},
             name='timeout'
         )
