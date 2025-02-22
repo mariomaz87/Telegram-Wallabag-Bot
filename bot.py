@@ -7,10 +7,9 @@ import asyncio
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
-    Application, 
-    CommandHandler, 
-    MessageHandler, 
-    filters, 
+    Application,
+    MessageHandler,
+    filters,
     ContextTypes,
     ConversationHandler
 )
@@ -38,14 +37,12 @@ WALLABAG_USERNAME = os.getenv("WALLABAG_USERNAME")
 WALLABAG_PASSWORD = os.getenv("WALLABAG_PASSWORD")
 WALLABAG_DEFAULT_ARCHIVE = os.getenv("WALLABAG_DEFAULT_ARCHIVE", "1")
 
-# Validate required environment variables
-if not all([TELEGRAM_TOKEN, MY_CHAT_ID, WALLABAG_URL, WALLABAG_CLIENT_ID, WALLABAG_CLIENT_SECRET, 
+if not all([TELEGRAM_TOKEN, MY_CHAT_ID, WALLABAG_URL, WALLABAG_CLIENT_ID, WALLABAG_CLIENT_SECRET,
             WALLABAG_USERNAME, WALLABAG_PASSWORD]):
     logger.error("Missing required environment variables!")
     sys.exit(1)
 
 def chat_id_restricted(func):
-    """Decorator to restrict bot usage to specific chat ID"""
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         if str(update.effective_chat.id) != MY_CHAT_ID:
             logger.warning(f"Unauthorized access denied for {update.effective_chat.id}")
@@ -64,203 +61,140 @@ def get_wallabag_token():
         "password": WALLABAG_PASSWORD
     }
     try:
-        logger.info(f"Requesting token from {token_url} with data: {data}")
+        logger.info("Requesting Wallabag token...")
         response = requests.post(token_url, data=data)
         response.raise_for_status()
-        token = response.json()["access_token"]
-        logger.info(f"Token request successful. Token: {token}")
-        return token
-    except requests.exceptions.HTTPError as http_err:
-        logger.error(f"HTTP error occurred: {http_err.response.text}")
-        raise
-    except Exception as err:
-        logger.error(f"Other error occurred: {err}")
+        return response.json()["access_token"]
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error requesting Wallabag token: {e}")
         raise
 
 def is_valid_url(url: str) -> bool:
-    """Validate the provided URL"""
     url_regex = re.compile(
-        r'^(?:http|ftp)s?://' # http:// or https://
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|' # domain...
-        r'localhost|' # localhost...
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|' # ...or ipv4
-        r'\[?[A-F0-9]*:[A-F0-9:]+\]?)' # ...or ipv6
-        r'(?::\d+)?' # optional port
+        r'^(?:http|ftp)s?://'
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?))'
+        r'(?::\d+)?'
         r'(?:/?|[/?]\S+)$', re.IGNORECASE)
     return re.match(url_regex, url) is not None
 
 def is_valid_tag(tag: str) -> bool:
-    """Validate the provided tag"""
-    # Assuming tags should not contain spaces and special characters
+    # Remove any whitespace before validation
+    tag = tag.strip()
     tag_regex = re.compile(r'^[a-zA-Z0-9_-]+$')
-    return re.match(tag_regex, tag) is not None
-
-@chat_id_restricted
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a message when the command /start is issued"""
-    await update.message.reply_text("Send me a URL to save it to Wallabag. "
-                                  "You can add tags in the same message after the URL (in a new line) "
-                                  "or in a follow-up message within 10 seconds.")
-    return ConversationHandler.END
-
-async def process_url_and_tags(update: Update, url: str, tags: str) -> None:
-    """Process URL and tags with Wallabag"""
-    try:
-        token = get_wallabag_token()
-        headers = {'Authorization': f'Bearer {token}'}
-        
-        archive_value = 1 if WALLABAG_DEFAULT_ARCHIVE not in ["0", "1"] else int(WALLABAG_DEFAULT_ARCHIVE)
-        
-        data = {
-            'url': url,
-            'tags': tags,
-            'archive': archive_value
-        }
-        
-        response = requests.post(f'{WALLABAG_URL}/api/entries.json',
-                               headers=headers,
-                               json=data)
-        
-        if response.status_code == 200:
-            if tags:
-                await update.message.reply_text(f"Article saved with tags: {tags}")
-            else:
-                await update.message.reply_text("Article saved without tags")
-        else:
-            await update.message.reply_text(f"Failed to save the article. Status code: {response.status_code}")
-            logger.error(f"Failed to save article. Response: {response.text}")
-            
-    except Exception as e:
-        logger.error(f"Error saving article: {e}")
-        await update.message.reply_text("An error occurred while saving the article")
+    return bool(tag) and re.match(tag_regex, tag) is not None
 
 @chat_id_restricted
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the initial URL message"""
-    # Clear any previous state
     context.user_data.clear()
-
     message_text = update.message.text.strip()
-
-    # Split message into lines
-    lines = message_text.split('\n')
-    first_line_parts = lines[0].split()
-    url = first_line_parts[0].strip()
-
-    if not is_valid_url(url):
-        await update.message.reply_text("The provided URL is invalid. Please provide a valid URL.")
+    urls = [word for word in message_text.split() if is_valid_url(word)]
+    
+    if len(urls) > 1:
+        await update.message.reply_text("Please provide only one URL at a time.")
         return ConversationHandler.END
     
-    # Store URL in context
+    if not urls:
+        await update.message.reply_text("No valid URL found. Please provide a valid URL.")
+        return ConversationHandler.END
+    
+    url = urls[0]
     context.user_data['current_url'] = url
+    await update.message.reply_text("Waiting 10 seconds for tags...")
+    
+    # Store the job in user_data so we can cancel it later
+    job = context.job_queue.run_once(timeout_callback, 10, data={'chat_id': update.effective_chat.id, 'url': url})
+    context.user_data['timeout_job'] = job
+    
+    return WAITING_FOR_TAGS
 
-    # Check for tags in the same line after the URL
-    if len(first_line_parts) > 1:
-        tags = " ".join(first_line_parts[1:]).strip()
-        if not is_valid_tag(tags):
-            await update.message.reply_text("One or more provided tags are invalid. Please provide valid tags.")
-            return ConversationHandler.END
-        await process_url_and_tags(update, url, tags)
-        context.user_data.clear()  # Clear state after processing
-        return ConversationHandler.END
-    # Check for tags in next line
-    elif len(lines) > 1:
-        tags = lines[1].strip()
-        if not is_valid_tag(tags):
-            await update.message.reply_text("One or more provided tags are invalid. Please provide valid tags.")
-            return ConversationHandler.END
-        await process_url_and_tags(update, url, tags)
-        context.user_data.clear()  # Clear state after processing
-        return ConversationHandler.END
-    else:
-        # Wait for potential tags
-        await update.message.reply_text("Waiting 10 seconds for tags...")
-        context.job_queue.run_once(
-            callback=timeout_callback, 
-            when=10, 
-            data={'update': update, 'url': url},
-            name='timeout'
-        )
-        return WAITING_FOR_TAGS
+async def timeout_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        # Check if the job was cancelled
+        if context.job.removed:
+            return
+            
+        chat_id = context.job.data['chat_id']
+        url = context.job.data['url']
+        
+        class FakeUpdate:
+            def __init__(self, chat_id):
+                self.effective_chat = type('obj', (object,), {'id': chat_id})
+                self.message = type('obj', (object,), {'reply_text': None})
+            async def reply_text(self, text):
+                await context.bot.send_message(chat_id=self.effective_chat.id, text=text)
+
+        fake_update = FakeUpdate(chat_id)
+        fake_update.message.reply_text = fake_update.reply_text
+        await process_url_and_tags(fake_update, url, "")
+    except Exception as e:
+        logger.error(f"Error in timeout_callback: {e}")
 
 @chat_id_restricted
 async def handle_tags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle the tags message"""
     url = context.user_data.get('current_url')
-    if not url:  # If no URL in context, ignore
+    if not url:
         return ConversationHandler.END
-        
-    tags = update.message.text.strip()
     
-    # Remove the scheduled timeout job
-    current_jobs = context.job_queue.get_jobs_by_name('timeout')
-    for job in current_jobs:
-        job.schedule_removal()
+    # Cancel the timeout job
+    if 'timeout_job' in context.user_data:
+        context.user_data['timeout_job'].schedule_removal()
+    
+    # Split tags by both commas and spaces, and clean up
+    tags_input = update.message.text.strip()
+    # First split by comma, then by spaces if any
+    tags_list = []
+    for tag_group in tags_input.split(','):
+        tags_list.extend(tag_group.split())
+    # Remove empty tags and strip whitespace
+    tags_list = [tag.strip() for tag in tags_list if tag.strip()]
+    
+    if tags_list and not all(is_valid_tag(tag) for tag in tags_list):
+        await update.message.reply_text("One or more provided tags are invalid. Tags can only contain letters, numbers, underscores, and hyphens.")
+        return ConversationHandler.END
+    
+    # Join tags with comma for Wallabag API
+    tags = ','.join(tags_list)
     
     await process_url_and_tags(update, url, tags)
-    context.user_data.clear()  # Clear state after processing
+    context.user_data.clear()
     return ConversationHandler.END
 
-async def timeout_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle timeout when no tags are provided"""
-    job = context.job
-    update = job.data['update']
-    url = job.data['url']
-    
-    await process_url_and_tags(update, url, "")
-    context.application.user_data[update.effective_user.id].clear()  # Clear state after timeout
-
-@chat_id_restricted
-async def timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle timeout when waiting for tags"""
-    url = context.user_data.get('current_url')
-    await process_url_and_tags(update, url, "")
-    return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancel the conversation"""
-    await update.message.reply_text("Operation cancelled.")
-    return ConversationHandler.END
+async def process_url_and_tags(update: Update, url: str, tags: str) -> None:
+    try:
+        token = get_wallabag_token()
+        headers = {'Authorization': f'Bearer {token}'}
+        data = {'url': url, 'tags': tags, 'archive': int(WALLABAG_DEFAULT_ARCHIVE)}
+        
+        logger.info(f"Saving URL to Wallabag: {url} with tags: {tags}")
+        response = requests.post(f'{WALLABAG_URL}/api/entries.json', headers=headers, json=data)
+        
+        if response.status_code == 200:
+            await update.message.reply_text(f"Article saved with tags: {tags}" if tags else "Article saved without tags.")
+        else:
+            logger.error(f"Failed to save article. Response: {response.text}")
+            await update.message.reply_text(f"Failed to save the article. Error: {response.json().get('error_description', 'Unknown error')}")
+    except Exception as e:
+        logger.error(f"Unexpected error saving article: {e}")
+        await update.message.reply_text("An unexpected error occurred while saving the article.")
 
 def main() -> None:
-    """Start the bot"""
-    try:
-        logger.info("Starting bot...")
-        # Initialize with job queue
-        application = (
-            Application.builder()
-            .token(TELEGRAM_TOKEN)
-            .build()
-        )
-        
-        # Add error handler
-        application.add_error_handler(error_handler)
+    # Create the Application and pass it your bot's token
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-        # Add conversation handler
-        conv_handler = ConversationHandler(
-            entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url)],
-            states={
-                WAITING_FOR_TAGS: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tags),
-                ]
-            },
-            fallbacks=[CommandHandler("cancel", cancel)]
-        )
+    # Add conversation handler
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url)],
+        states={
+            WAITING_FOR_TAGS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tags)],
+        },
+        fallbacks=[],
+    )
 
-        # Add handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(conv_handler)
+    application.add_handler(conv_handler)
 
-        # Start the bot
-        application.run_polling()
-
-    except Exception as e:
-        logger.error(f"Error running bot: {e}")
-        sys.exit(1)
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle errors"""
-    logger.error(f"Exception while handling an update: {context.error}")
+    # Start the Bot
+    logger.info("Starting bot...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
